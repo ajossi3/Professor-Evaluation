@@ -1,0 +1,714 @@
+---
+title: "STAT 4610 FCQ Project"
+author: "Andrew Jossi and Brady Schiff"
+date: "May 1, 2024"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+library(MASS)
+library(e1071)
+library(tidyverse)
+library(dplyr)
+library(glmnet)
+library(caret)
+library(ggplot2)
+library(corrplot)
+library(tree)
+library(pROC)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+\newpage
+
+## Introduction
+This project aims to conduct a comprehensive examination of the FCQ dataset sourced from CU’s Boulder, Colorado Springs, and Denver campuses, which can be accessed at www.colorado.edu/fcq/fcq-results. The primary purpose of this project is to explore the factors that contribute to exceptional teaching quality. Employing a variety of models, ranging from easily interpretable to more complex predictive frameworks, our goal is to pinpoint the key predictors of outstanding instruction. Our analysis will encompass four distinct types of predictive models, each offering different predictive capabilities and interpretability levels: a stepwise linear regression model, a lasso model, logistic model and diverse tree models. Ultimately, our goal is to utilize these models to determine if a new instructor will thrive at the University of Colorado. Specifically, our analysis will focus on the 2010-2019 dataset due to its size and more defined response variable, particularly the 'Instr' column, compared to other datasets available.
+
+## Data
+Our dataset includes the FCQ (faculty course questionnaire) results spanning from 2010 to 2019 from the University of Colorado. We have opted to exclude the more recent dataset for the reasons previously mentioned. The 2010-2019 dataset contains a total of 28 columns, including two columns representing the standard deviations of the 'Instr overall' and 'Course overall' ratings. We have chosen not to utilize these columns as our focus is on identifying predictors that contribute to the 'Instr overall' rating, and these standard deviation values lack interpretability. For instance, stating that a low 'Instr SD' indicates a good instructor is not particularly informative. Instead, our analysis will concentrate on the other predictors with most of the models using only numeric predictors. A description of the data set can be seen below where the mean scores are all measured on the scale: 1=lowest...6=highest. 
+
+| Column Header  | Full Description                                        |
+|----------------|---------------------------------------------------------|
+| Term           | Term                                                    |
+| Year           | Year                                                    |
+| Campus         | Campus                                                  |
+| College        | College                                                 |
+| Dept           | Department                                              |
+| Sbjct          | Subject                                                 |
+| Crse           | Course                                                  |
+| Sect           | Course Section                                          |
+| Crse Title     | Course Title                                            |
+| Instructor Name| Instructor Name                                         |
+| Instr Grp      | Instructor Group                                        |
+| Crse Type      | Course Type                                             |
+| Crse Lvl       | Course Level                                            |
+| Onlin          | Online Administration                                   |
+| Enroll         | Course Enrollment #                                     |
+| # Resp         | # of Responses                                          |
+| Resp Rate      | Response Rate                                           |
+| HrsPerWk       | the average number of hours students spent on this      |
+|                | course per weeek.                                       |
+| Interest       | Mean Score of personal interest in this                 |
+|                | course before enrolling                                 |
+| Challenge      | Mean Score of intellectual challenge of this course     |
+| Learned        | Mean Score of how much students learned in this course  |
+| Course         | Mean Score of how students rated the course overall     |
+| Effect         | Mean Score of the instructor's effectiveness in         |
+|                | encouraging interest in this subject.                   |
+| Avail          | Mean Score of the instructor's availability             |
+| Respect        | Mean Score of the instructor's respect of students      |
+| Instr          | Mean Score of the instructor's overall rating           |
+
+
+
+
+## Exploratory Analysis
+```{r, echo = F, results = F, warning = F}
+fcq <- read_csv("fcqdata3.csv")
+
+fcq <- fcq %>% rename_all(~gsub(" ", "", .))
+rows_to_remove <- c(105946, 105985, 111690)
+fcq <- fcq[-rows_to_remove, ]
+
+fcq$RespRate <- as.numeric(sub("%", "", fcq$RespRate))
+names(fcq)[names(fcq) == "#Resp"] <- "NumResp"
+
+#view(fcq)
+```
+
+```{r, echo = F, results = F}
+fcq <- na.omit(fcq)
+```
+
+```{r, echo = F, results = F}
+fcqsamp <- fcq[sample(nrow(fcq), 200), ]
+```
+
+### Plots
+```{r, echo = F, fig.width=6, fig.height=6}
+# Filter out non-numeric columns
+numeric_columns <- sapply(fcq, is.numeric)
+numeric_data <- fcq[, numeric_columns]
+
+# Calculate correlation matrix
+correlation_matrix <- cor(numeric_data)
+
+# Set graphical parameters
+par(mar = c(2, 4, 2, 2))  # Increase right margin
+cex_main <- 0.6  # Adjust title size
+plot_correlation <- corrplot(correlation_matrix, method = "circle", title = "Correlation Matrix", cex.main = cex_main)
+
+# Display the plot
+print(plot_correlation)
+
+```
+
+```{r, echo = F}
+suppressMessages({
+  ggplot(fcqsamp, aes(x = Course, y = RespRate)) +
+    geom_point() +  # Scatter plot
+    geom_smooth(method = "lm", se = FALSE, color = "blue") +  # Add linear regression line
+    facet_wrap(~ CrseLvl) +  # Facet by Course Level
+    labs(x = "Course", y = "Response Rate") +  # Labels for axes
+    ggtitle("Scatter Plot of Response Rate by Course Rating Faceted by Course Level") +
+    theme_bw()
+})
+```
+As we can see within this plot, there is very little correlation within response rate by course rating. It would be logical to predict that there would be a greater response rate when there is a higher course overall rating. It is important to acknowledge this trend is slightly truer within lower division undergraduate courses. Additionally, within upper level undergraduate courses, we can see that there is mainly course ratings above 4, with most people completing the FCQ and the courses having higher (above 50%) response rate.
+
+```{r, echo = F}
+ggplot(fcqsamp, aes(x = Effect, y = Instr)) +
+  geom_point() +
+    geom_smooth(method = "lm", se = FALSE, color = "blue") + 
+  #facet_wrap(~ CrseLvl) +
+  labs(x = "Effectiveness", y = "Instructor Rating") +
+  ggtitle("Instructor Rating by Effect") +
+  theme_bw()
+```
+
+As seen within this graph, there is an extreme positive linear correlation between the rating of an instructor and their effectiveness as a professor. This is seen across all course levels. Intuitively, this should be the case, since someone who rates their professor as very effective is much more likely to rate their professor a good rating.
+
+```{r, echo = F, results = F}
+randDPT <- fcq[sample(nrow(fcq), 5), ]
+```
+
+```{r, echo = F, results = F}
+# List of items to filter by
+departments <- c("APPM", "IAFS", "PWRT", "HUEN", "AREN")
+
+# Filter the data frame using dplyr
+dptinst <- fcq %>%
+  filter(Dept %in% departments)
+```
+
+```{r, echo = F}
+# Create the boxplot
+ggplot(dptinst, aes(x = Dept, y = Instr)) +
+  geom_boxplot() +
+  labs(x = "Department", y = "Instructor Rating") +
+  ggtitle("Boxplot of Instr by Department") +
+  geom_hline(yintercept = 5.121, color = "red") +
+  theme_bw()
+```
+To make this graph, I took a random sample of four departments to analyze if there is a wide sway between departments as far as instructor rating. From this graph, we can see that there is very little sway in this data set, and that the vast majority of the departments are within the range of 5-6. This is of note since random departments will likely have ratings above a 5. This occurs likely since students filling out an FCQ are more likely to enjoy a professor and rate them higher overall.
+
+```{r}
+
+# Group the data based on whether 'Instr' is above or below 4.0
+grouped_data <- fcq %>%
+  filter(!is.na(Instr)) %>%  
+  group_by(Instr_group = ifelse(Instr >= 5.0, "Instr >= 5.0", "Instr < 5.0")) %>%
+  summarise(Learned = mean(Learned, na.rm = TRUE),
+            Challenge = mean(Challenge, na.rm = TRUE),
+            Effect = mean(Effect, na.rm = TRUE),
+            Avail = mean(Avail, na.rm = TRUE),
+            Respect = mean(Respect, na.rm = TRUE))
+
+# Reshape the data into long format for plotting
+data_long <- grouped_data %>%
+  pivot_longer(cols = Learned:Respect, names_to = "Predictor", values_to = "Average")
+
+# Plot the grouped bar graph of each average of predictor variable
+ggplot(data_long, aes(x = Predictor, y = Average, fill = Instr_group)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  geom_text(aes(label = ifelse(Instr_group == "Instr < 5.0", round(Average, 2), "")),
+            position = position_dodge(width = 0.7), vjust = -0.5) +
+  geom_text(aes(label = ifelse(Instr_group == "Instr >= 5.0", round(Average, 2), "")),
+            position = position_dodge(width = 0.7), vjust = 1.5) +
+  labs(x = "Predictor", y = "Average of Predictor Variables") +
+  ggtitle("Plot of Notable Average Variables Grouped by Teacher Rating") +
+  scale_fill_manual(name = "Teacher Rating",
+                    values = c("Instr < 5.0" = "#FF9999", "Instr >= 5.0" = "#99CCFF"),
+                    labels = c("Instr < 5.0" = "Not Highly Rated Teacher",
+                               "Instr >= 5.0" = "Highly Rated Teacher (above 5.0 Instr)")) +
+  theme(legend.position = "top", legend.justification = "right") 
+```
+This graph shows the average value of several key predictor variables, and groups them by highly rated and not highly rated teachers. The metric to determine what a highly rated teacher is was a Instr value of 5 or above. This makes up about 68% of the data, and is important to note. It ends up showing a bar graph with a rather simple explanation, that the higher rated teachers usually have higher scores for availability, effectiveness, etc.
+\newpage
+
+## Modeling
+### Linear Regression 
+The first model is an ordinary linear regression, which is represented by the equation below.
+
+$$\hat{Y_i} = \beta_0 + \beta_1 X_{i1} + \beta_2 X_{i2} + \ldots + \beta_k X_{ik}$$
+$\hat{Y_i}$ is the predicted response\
+$\beta_0$ represents the intercept\
+$\beta_k$ represents the coefficient\
+$X_{ik}$ represents a feature\
+
+$$
+
+\begin{align*}
+\hat{Y_i} &= 9.317 - 0.004842 \times \text{Year} + 0.00032 \times \text{Enroll} - 0.00086 \times \text{NumResp} \\
+&\quad - 0.0005121 \times \text{RespRate} - 0.01473 \times \text{HrsPerWk} - 0.09526 \times \text{Interest} \\
+&\quad - 0.007383 \times \text{Challenge} - 0.01362 \times \text{Learned} + 0.2034 \times \text{Course} \\
+&\quad + 0.5735 \times \text{Effect} + 0.211 \times \text{Avail} + 0.2195 \times \text{Respect} + \epsilon
+\end{align*}
+
+$$
+```{r, echo = F, results = F}
+fcqnum <- select_if(fcq, is.numeric)
+
+fcqnum <- fcqnum %>%
+  dplyr::select(-Crse, -SDCrse, -SDInstr)
+```
+
+```{r, echo = F, results = F}
+set.seed(303)
+rows <- sample(1:nrow(fcqnum),size=floor(nrow(fcqnum)*0.75))
+train <- fcqnum[rows,]
+test <- fcqnum[-rows,]
+```
+
+```{r, echo = F, results = F}
+linear.mod <- lm(Instr ~ ., data = fcqnum)
+summary(linear.mod)
+```
+
+
+
+```{r, echo = F, results = F}
+predictions <- predict(linear.mod, newdata = fcqnum)
+rmse <- sqrt(mean((predictions - fcqnum$Instr)^2))
+print(paste("RMSE:", rmse))
+```
+The RMSE of the liner regression model is 0.25.
+```{r, echo = F, results = F}
+stepwise.mod <- step(linear.mod, direction = "both")
+
+summary(stepwise.mod)
+```
+```{r}
+predictions <- predict(stepwise.mod, newdata = fcqnum)
+rmse <- sqrt(mean((predictions - fcqnum$Instr)^2))
+print(paste("RMSE:", rmse))
+```
+Overall, within the linear regression models, we were able to predict a teachers instructor rating to reliably within a quarter of a point. This is significant seeing as the scale is on a 0-6 rating, and a professor with a 0 could be extremely bad at teaching. It is important to get as accurate as possible within these models. Furthermore, this model is based on the fundamental process of training and testing sets. Since it is crucial to test your model to determine a root mean squared error on data the model has never seen before, we found it most useful to train the set using 75% of the available data and test it on the other 25%. Had we made any of our models with 100% training data, we would be testing on compromised data, and the model would likely over perform. It is extremely important to use training and testing sets any time we are analyzing data in depth. As well, our models were built using all numeric variables, and using step wise. 
+
+Step wise uses computer trials to find what are deemed the most important variables and most crucial in predicting any given variable. In our trials, we found no explicit difference in accuracy when using step wise or all numeric variables, indicating that all variables are needed to some extent, and that they are not overfitting by being in the model.
+\newpage
+### Lasso Model 
+
+We can see from our step wise selection that we lost a variable, so we will use a lasso regression to see if we can further simplify the model. Lasso represents regression, but the coefficients also have a penalty term applied to them that makes non-relevant coefficients to go to 0. 
+
+Lasso follows the same $\hat{Y_i}$ formula as OLS, but the way the predictors are found is different the OLS equation is changed and instead we are minimizing the function with an added penalty term
+
+$$(Y-X \beta)^T(Y-X \beta)+\lambda \|\beta \|_1 = (Y-X \beta)^T(Y-X \beta)+\lambda \sum^p_{i=1}|\beta|$$
+```{r, echo = F, results = F}
+#define X matrices
+x_train <- model.matrix(Instr~.,data=train)[,-1]
+x_test <- model.matrix(Instr~.,data=test)[,-1]
+
+#define y vector
+y_train <- train$Instr
+```
+
+```{r, echo = F}
+# Fit a Lasso regression model
+lasso_model <- glmnet(x = x_train, y = y_train, family = "gaussian", alpha = 1)
+
+# Use cross-validation to select the optimal lambda (regularization parameter)
+cv_fit <- cv.glmnet(x = x_train, y = y_train, family = "gaussian", alpha = 1)
+
+# Extract the optimal lambda
+optimal_lambda <- cv_fit$lambda.min
+
+# Refit the Lasso model with the optimal lambda
+lasso_model_optimal <- glmnet(x = x_train, y = y_train, family = "gaussian", alpha = 1, lambda = optimal_lambda)
+
+predictions <- predict(lasso_model_optimal, newx = as.matrix(test[, -ncol(test)]))
+
+rmse <- sqrt(mean((predictions - test$Instr)^2))
+print(paste("RMSE:", rmse))
+coefficients(lasso_model_optimal)
+```
+
+The RMSE of the lasso model improved slightly but it is still 0.25 when rounded to two decimal places. Based on the complexity of the model, the original linear regression model is still the easiest to interpret and has just about the same RMSE. By looking at the coefficients of the lasso model, we can see that `Enroll` and `Learned` were deemed irrelevant to the model and therefore not used. It is interesting that `Learned` is not used in the lasso model based ont the context of the problem. One could assume that how much a student felt they learned in the course would greatly impact the instructor rating, however we determined that it is not necessary for the model. 
+
+### Logistic
+```{r, echo = F, results = F}
+fcq.log <- fcq %>%
+  mutate(Good = ifelse(Instr >= 5, 1, 0))
+```
+
+```{r, echo = F, results = F}
+sum(fcq.log$Good)
+```
+
+```{r, echo = F}
+set.seed(303)
+rows <- sample(1:nrow(fcq.log), size = floor(nrow(fcq.log)*.75))
+training <- fcq.log[rows,]
+testing <- fcq.log[-rows,]
+```
+
+
+According to this data, there are 39,828 professors that have a rating of a "Highly Rated Professor". There are 18,313 professors that are not "Highly Rated". This means that there are about 68.5% highly rated professors and 31.5% not highly rated professors. If someone were to guess at random, they would be right nearly 68% of the time if they purely guessed "Highly Rated".
+
+```{r, echo = F, results = F}
+logmod <- glm(Good ~ RespRate + Year + Enroll + HrsPerWk + Interest + CrseLvl + Learned + Course + Effect + Avail + Respect, data = training, family = binomial)
+summary(logmod)
+```
+
+```{r, echo = F, results = F}
+predicted <- predict(logmod, newdata = testing, type = "response")
+
+predicted_class <- ifelse(predicted >= 0.6, "Good Professor Rating", "Not Good Professor Rating")
+
+# Create the confusion matrix
+conf_matrix <- table(predicted_class, testing$Good)
+
+# Print the confusion matrix
+print(conf_matrix)
+
+```
+
+
+
+| Actual Values   | Not Highly Rated   | Highly Rated   |
+|-----------------|--------------------|----------------|
+|    Predicted    |                    |                |
+| Not Highly Rated|        4078        |     654        |
+|  Highly Rated   |         508        |     9295       |
+
+
+
+```{r, echo = F, warning = F}
+# Predict probabilities on the testing data
+predicted_probs <- predict(logmod, newdata = testing, type = "response")
+
+# Create ROC curve
+roc_curve <- roc(testing$Good, predicted_probs)
+
+# Plot the ROC curve
+plot(roc_curve, main = "ROC Curve for Logistic Model Predicting A 'Highly Rated Professor'", col = "blue")
+
+# Add AUC to the plot
+auc_value <- round(auc(roc_curve), 2)
+text(0.8, 0.2, paste("AUC =", auc_value), col = "blue")
+
+```
+
+
+From this logistic regression model, we were able to make a model that is 92.15% accurate in determining if a professor is highly rated (above or equal Instr of 5). This model is made up of 11 predictor variables, including most notably RespRate, Course Level, and Effect of professor. These variables are able to identify very efficiently if a professor will clear that 5.0 rating, and earn the "Highly Rated" title. This model has a cut-off at .6, meaning if the model gives a value above .6, the professor is classified as "Highly Rated", and vice versa. This led to the following results:
+
+Accuracy: 92.16%
+Proportion of Correct Predictions: 92.16%
+Error Rate: 7.84%
+True Positive Rate: 93.82%
+False Positive Rate: 11.51%
+
+```{r, echo = F, results = F}
+predicted_probs <- predict(logmod, newdata = testing, type = "response")
+accuracy <- sum(ifelse(predicted_probs >= 0.5, 1, 0) == testing$Good) / length(testing$Good)
+```
+
+```{r, echo = F, results = F}
+testing$class_pred <- ifelse(predicted_probs >= 0.6, 1, 0)
+```
+
+```{r, echo = F, results = F}
+mean(testing$class_pred != testing$Good)
+```
+
+### SVM
+```{r, echo = F, results = F}
+fcqSVM <- data.frame(Effect = fcq.log$Effect, Avail = fcq.log$Avail, Good = fcq.log$Good)
+nrows <- sample(1:nrow(fcqSVM),size=floor(nrow(fcqSVM)*0.75))
+fcqSVM$Good <- as.factor(fcqSVM$Good)
+training2 <- fcqSVM[nrows,]
+testing2 <- fcqSVM[-nrows,]
+```
+
+
+
+
+```{r, echo = F, results = F}
+svmPoly <- svm(Good~., kernel = "linear", degree = 2, cost = .1, data = training2)
+predsPoly <- predict(svmPoly, newdata = testing2)
+confusionMatrix(predsPoly, testing2$Good)
+```
+
+
+
+| Actual Values   | Not Highly Rated   | Highly Rated   |
+|-----------------|--------------------|----------------|
+|    Predicted    |                    |                |
+| Not Highly Rated|        3822        |     559        |
+|  Highly Rated   |         730        |     9425       |
+
+
+
+Accuracy: 91.13%
+Proportion of Correct Predictions: 91.13%
+Error Rate: 8.87%
+True Positive Rate: 94.44%
+False Positive Rate: 16.04%
+
+
+Within the support vector machine, we are able to get an extremely accurate and simple model. By using only two variables, the machine is able to generate a cutoff line that predicts where we should assume the professor is highly rated. Since they share a linear relationship and are closely related, it made more sense to have this support vector machine act linearly. With that, using a tuning parameter, I found the best cost for the model to be 0.1. This was the most efficient and accurate for the model. In the end, it ended up being slightly less accurate than the logisitic model. What is interesting is that it only takes in two predictor variables as opposed to 11 within the logistic model. 
+
+To save space within the machine, I would recommend using the support vector machine since it only requires two very simple predictor variables (Avail and Effect) to predict accurately if a teacher will be "Highly Rated".
+```{r,echo = F}
+x1_values <- seq(0, 6, length.out = 100)
+x2_values <- seq(0, 6, length.out = 100)
+grid <- expand.grid(Effect = x1_values, Avail = x2_values)
+
+# Predict using SVM model
+predictions <- predict(svmPoly, newdata = grid)
+
+# Plot
+plot(grid$Effect, grid$Avail, type = "n", xlab = "Effect", ylab = "Avail")
+points(grid$Effect[predictions == "1"], grid$Avail[predictions == "1"], col = "blue", pch = 20, cex = 0.5)
+points(grid$Effect[predictions == "0"], grid$Avail[predictions == "0"], col = "red", pch = 20, cex = 0.5)
+
+# Add legend
+legend("topright", legend = c("Highly Rated Professor: +1", "Not Highly Rated: 0"),
+       col = c("blue", "red"), pch = 20, cex = 1.2, bg = "white")
+```
+\newpage
+
+### Decision Tree
+A regression tree just splits the predictor space into regions, and uses the average response within each region as the predictor. The regression tree will choose the best predictor variables for the tree and determine the best number of nodes for the model. As we are focus on enhancing predictive ability, we are primarily focused on reducing the RMSE for our model.
+
+$$Y = f(\mathbf{X}) + \epsilon$$
+```{r, echo = F, results = F}
+model_tree <- tree(Instr ~., data = train)
+summary(model_tree)
+```
+```{r, echo = F}
+plot(model_tree)
+text(model_tree, pretty = 0)
+```
+```{r, results = F, echo = F}
+preds <- predict(model_tree,newdata = test)
+RMSE_tree <- sqrt(mean((test$Instr - preds)^2))
+cat(paste("RMSE of Regression Tree:", round(RMSE_tree, 2)))
+```
+After plotting our regression tree, we can see that the model chose `Effect` as the most important and needed variable with 8 terminal nodes for the tree. This makes sense because if an instructor is effective in teaching for the class then they will have a higher rating. The tree is interesting as it does not take in any other variables which are deemed unimportant by the model. Based on the graph , we can see `Effect` is split into different regions which will give us our `Instr` rating. Based on the thresholds, we can identify that `Effect` has a positive relationship `Instr` which shows lower ratings for one will give a lower rating for the other and vice versa. The RMSE of the regression tree is 0.31 which is not too bad. We can try to reduce the RMSE by pruning the tree but first we can perform a cross-validation to see if our regression tree is already the best.
+
+### Bagged Tree
+$$\hat{f}(\mathbf{X}) = \frac{1}{B}\sum_{b = 1}^{B}\hat{f}^b(\mathbf{x})$$
+
+
+After 500 iterations, the RMSE of the bagged regression tree went down to 0.31, which is not a significant improvement. 
+
+\newpage
+
+## Conclusion
+
+
+From this project, we can conclude that, based on this data, it is possible to predict whether a new professor will be a "good" professor or not. When analyzing it initially, we quickly found that these predictor variables exemplified the concept of multicolinearity, the occurence of variables sharing trends to the point where they can confuse models. This was observed within many of our plots and we were able to identify general patterns moving forward.
+
+Within the regression model, we were able to achieve a root mean squared error of .25, a value that means the instructor can be predicted reliably to within less than a quarter of a point. This linear regression model was backed up by a lasso model, in which we find variables that can be removed through a "lasso" process that sends some variables effectively to 0. In making this lasso model, we were able to achieve the exact same RMSE, equal to .25. To put into perspective, we interpret a "highly rated professor" as one above a 5.0 on a 6.0 scale. That means that a root mean squared error of .25 is very likely to be accurate enough to determine this.
+
+Furthermore, we developed a logistic regression model to predict if a professor would be classified as "Highly Rated". They were classified as "Highly Rated" when they had a 5.0 or above on this 6.0 scale. This model developed an accuracy rate of 92%. Checked with a testing and training set of data (.75 split), this model held up and accurately found when a teacher was going to be highly rated.
+
+To add on, we used a support vector machine with only two predictor variables (Effect and Avail) to get a model that tested over 90% accurately. This accurate support vector machine further added to our confidence, indicating we can accurately predict whether a professor will be effective and highly rated with only these two predictor variables.
+
+Finally, we developed a regular and bagged regression tree. This acted as a final check that led to a root mean squared error of approximately .3 on both of them. Our least accurate regression, it was still trustworthy and efficient in its prediction of a teachers instructor rating.
+
+Overall, this project has given us confidence we can accurately predict a professor's rating and their reception from a random student. In our least accurate regression, we were still relatively accurate, and in our least complex model, we were nearly 92% effective in predicting if a professor was going to be highly rated or not. To sum, we are confident that if we were able to gain some basic data on a professor, such as their availability and effectiveness, we would be able to predict their teacher "rating" and if they would be highly rated.
+
+
+\newpage
+
+## Appendix
+
+```{r, eval = F, results = F}
+fcq <- read_csv("fcqdata3.csv")
+
+fcq <- fcq %>% rename_all(~gsub(" ", "", .))
+rows_to_remove <- c(105946, 105985, 111690)
+fcq <- fcq[-rows_to_remove, ]
+
+names(fcq)[names(fcq) == "#Resp"] <- "NumResp"
+
+#view(fcq)
+```
+
+```{r, eval = F, results = F}
+fcqdata <- na.omit(fcq)
+
+#summary(fcqdata)
+```
+
+```{r, eval = F, results = F}
+# Filter out non-numeric columns
+numeric_columns <- sapply(fcqdata, is.numeric)
+numeric_data <- fcqdata[, numeric_columns]
+
+# Calculate correlation matrix
+correlation_matrix <- cor(numeric_data)
+
+# Plot correlation matrix
+plot_correlation <- corrplot(correlation_matrix, method = "circle", title = "Correlation Matrix")
+
+# Display the plot
+#print(plot_correlation)
+```
+
+```{r, eval = F, results = F}
+fcqnum <- select_if(fcqdata, is.numeric)
+
+fcqnum <- fcqnum %>%
+  dplyr::select(-Crse, -SDCrse, -SDInstr)
+```
+
+```{r, eval = F, results = F}
+set.seed(303)
+rows <- sample(1:nrow(fcqnum),size=floor(nrow(fcqnum)*0.75))
+train <- fcqnum[rows,]
+test <- fcqnum[-rows,]
+```
+
+```{r, eval = F, results = F}
+linear.mod <- lm(Instr ~ ., data = fcqnum)
+summary(linear.mod)
+```
+
+```{r, eval = F, results = F}
+predictions <- predict(linear.mod, newdata = fcqnum)
+rmse <- sqrt(mean((predictions - fcqnum$Instr)^2))
+print(paste("RMSE:", rmse))
+```
+
+```{r, echo = F, results = F}
+stepwise.mod <- step(linear.mod, direction = "both")
+
+summary(stepwise.mod)
+```
+
+```{r, echo = F, results = F}
+predictions <- predict(stepwise.mod, newdata = fcqnum)
+rmse <- sqrt(mean((predictions - fcqnum$Instr)^2))
+print(paste("RMSE:", rmse))
+```
+
+```{r, echo = F, results = F}
+#define X matrices
+x_train <- model.matrix(Instr~.,data=train)[,-1]
+x_test <- model.matrix(Instr~.,data=test)[,-1]
+
+#define y vector
+y_train <- train$Instr
+```
+
+```{r, eval = F, results = F}
+# Fit a Lasso regression model
+lasso_model <- glmnet(x = x_train, y = y_train, family = "gaussian", alpha = 1)
+
+# Use cross-validation to select the optimal lambda (regularization parameter)
+cv_fit <- cv.glmnet(x = x_train, y = y_train, family = "gaussian", alpha = 1)
+
+# Extract the optimal lambda
+optimal_lambda <- cv_fit$lambda.min
+
+# Refit the Lasso model with the optimal lambda
+lasso_model_optimal <- glmnet(x = x_train, y = y_train, family = "gaussian", alpha = 1, lambda = optimal_lambda)
+
+predictions <- predict(lasso_model_optimal, newx = as.matrix(test[, -ncol(test)]))
+
+rmse <- sqrt(mean((predictions - test$Instr)^2))
+print(paste("RMSE:", rmse))
+```
+
+```{r, eval = F, results = F}
+fcq.log <- fcq %>%
+  mutate(Good = ifelse(Instr >= 5, 1, 0))
+```
+
+```{r, eval = F, results = F}
+sum(fcq.log$Good)
+```
+
+```{r, eval = F, results = F}
+set.seed(303)
+rows <- sample(1:nrow(fcq.log), size = floor(nrow(fcq.log)*.75))
+training <- fcq.log[rows,]
+testing <- fcq.log[-rows,]
+```
+
+```{r, eval = F, results = F}
+logmod <- glm(Good ~ RespRate + Year + Enroll + HrsPerWk + Interest + CrseLvl + Learned + Course + Effect + Avail + Respect, data = training, family = binomial)
+summary(logmod)
+```
+
+```{r, eval = F, results = F}
+predicted <- predict(logmod, newdata = testing, type = "response")
+
+predicted_class <- ifelse(predicted >= 0.6, "Good Professor Rating", "Not Good Professor Rating")
+
+# Create the confusion matrix
+conf_matrix <- table(predicted_class, testing$Good)
+
+# Print the confusion matrix
+print(conf_matrix)
+
+```
+
+```{r, eval = F, warning = F}
+# Predict probabilities on the testing data
+predicted_probs <- predict(logmod, newdata = testing, type = "response")
+
+# Create ROC curve
+roc_curve <- roc(testing$Good, predicted_probs)
+
+# Plot the ROC curve
+plot(roc_curve, main = "ROC Curve for Logistic Model Predicting A 'Highly Rated Professor'", col = "blue")
+
+# Add AUC to the plot
+auc_value <- round(auc(roc_curve), 2)
+text(0.8, 0.2, paste("AUC =", auc_value), col = "blue")
+
+```
+
+```{r, eval = F, results = F}
+predicted_probs <- predict(logmod, newdata = testing, type = "response")
+accuracy <- sum(ifelse(predicted_probs >= 0.5, 1, 0) == testing$Good) / length(testing$Good)
+```
+
+```{r, eval = F, results = F}
+testing$class_pred <- ifelse(predicted_probs >= 0.6, 1, 0)
+```
+
+```{r, eval = F, results = F}
+mean(testing$class_pred != testing$Good)
+```
+
+```{r, eval = F, results = F}
+fcqSVM <- data.frame(Effect = fcq.log$Effect, Avail = fcq.log$Avail, Good = fcq.log$Good)
+nrows <- sample(1:nrow(fcqSVM),size=floor(nrow(fcqSVM)*0.75))
+fcqSVM$Good <- as.factor(fcqSVM$Good)
+training2 <- fcqSVM[nrows,]
+testing2 <- fcqSVM[-nrows,]
+```
+
+```{r, eval = F, results = F}
+svmPoly <- svm(Good~., kernel = "linear", degree = 2, cost = .1, data = training2)
+predsPoly <- predict(svmPoly, newdata = testing2)
+confusionMatrix(predsPoly, testing2$Good)
+```
+
+```{r,eval = F, results = F}
+x1_values <- seq(0, 6, length.out = 100)
+x2_values <- seq(0, 6, length.out = 100)
+grid <- expand.grid(Effect = x1_values, Avail = x2_values)
+
+# Predict using SVM model
+predictions <- predict(svmPoly, newdata = grid)
+
+# Plot
+plot(grid$Effect, grid$Avail, type = "n", xlab = "Effect", ylab = "Avail")
+points(grid$Effect[predictions == "1"], grid$Avail[predictions == "1"], col = "blue", pch = 20, cex = 0.5)
+points(grid$Effect[predictions == "0"], grid$Avail[predictions == "0"], col = "red", pch = 20, cex = 0.5)
+
+# Add legend
+legend("topright", legend = c("Highly Rated Professor: +1", "Not Highly Rated: 0"),
+       col = c("blue", "red"), pch = 20, cex = 1.2, bg = "white")
+```
+
+```{r, eval = F, results = F}
+model_tree <- tree(Instr ~., data = train)
+summary(model_tree)
+```
+
+```{r, eval = F, results = F}
+plot(model_tree)
+text(model_tree, pretty = 0)
+```
+
+```{r, eval = F, results = F}
+preds <- predict(model_tree,newdata = test)
+RMSE_tree <- sqrt(mean((test$Instr - preds)^2))
+cat(paste("RMSE of Regression Tree:", round(RMSE_tree, 2)))
+```
+
+```{r, eval = F, results = F}
+out <- tree(Instr~.,data=train)
+# predict on test data and check MSE
+pred <- predict(out,newdata=test)
+sqrt(mean( (test$Instr - pred)^2 )) # out of sample RMSE
+sqrt(mean(summary(out)$resid^2)) # in sample RMSE
+```
+
+```{r, eval = F, results = F}
+N <- 500
+PRED.boot <- matrix(nr=length(test$Instr),nc=N)
+
+set.seed(303)
+for(i in 1:N){
+  bag.indices <- sample(1:dim(train)[1],size=dim(train)[1],replace=TRUE)
+  out <- tree(Instr~.,data=train[bag.indices,])
+  PRED.boot[,i] <- predict(out,newdata=test)
+}
+# average the predictions from the bootstrap-resampled data tree fits
+PRED.bagged <- apply(PRED.boot,1,mean)
+
+sqrt(mean( (test$Instr - pred)^2 ))
+sqrt(mean( (test$Instr - PRED.bagged)^2 ))
+```
